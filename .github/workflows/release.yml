@@ -36,19 +36,6 @@ jobs:
         run: |
           go build -ldflags="-s -w -X main.version=${{ env.VERSION }}" -o bin/tts.exe .
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: Release ${{ env.VERSION }}
-          tag_name: ${{ env.VERSION }}
-          files: bin/tts.exe
-          body: |
-            Windows 离线 TTS 服务
-            
-            - 双击运行即可启动 HTTP 服务（端口 8080）
-            - 支持 POST /tts 接口
-            - 依赖系统 SAPI（需安装中文语音包）
-
       - name: Upload Artifact (optional)
         uses: actions/upload-artifact@v4
         with:
