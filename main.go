@@ -1,25 +1,52 @@
-// main.go
 package main
 
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
+	"os"
 	"strings"
+	"time"
 
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/go-ole/go-ole"
 	"github.com/go-ole/go-ole/oleutil"
+	"github.com/spf13/pflag"
 )
 
-// 请求结构体（支持 JSON）
-type TTSRequest struct {
-	Text string `json:"text"`
+type Config struct {
+	Broker   string
+	Topic    string
+	Username string
+	Password string
+}
+
+var f mqtt.MessageHandler = func(client mqtt.Client, msg mqtt.Message) {
+	payload := string(msg.Payload())
+	log.Printf("收到 MQTT 消息 [主题: %s]: %s", msg.Topic(), payload)
+
+	var text string
+	var j struct{ Text string `json:"text"` }
+	if err := json.Unmarshal([]byte(payload), &j); err == nil && j.Text != "" {
+		text = j.Text
+	} else {
+		text = payload
+	}
+
+	text = strings.TrimSpace(text)
+	if text == "" || len(text) > 500 {
+		log.Println("⚠️ 文本为空或过长，跳过朗读")
+		return
+	}
+
+	if err := speakText(text); err != nil {
+		log.Printf("❌ TTS 错误: %v", err)
+	} else {
+		log.Printf("✅ 已完成朗读: %q", text)
+	}
 }
 
 func speakText(text string) error {
-	// 每次调用独立初始化 COM（线程安全需注意，此处简单处理）
 	err := ole.CoInitialize(0)
 	if err != nil {
 		return fmt.Errorf("COM 初始化失败: %v", err)
@@ -36,89 +63,141 @@ func speakText(text string) error {
 	}
 	defer voice.Release()
 
-	// 阻塞直到语音播放完成（SAPI 默认同步）
 	_, err = oleutil.CallMethod(voice, "Speak", text)
-	if err != nil {
-		return fmt.Errorf("TTS Speak 失败: %v", err)
-	}
-
-	return nil
+	return err
 }
 
-func ttsHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "仅支持 POST 方法", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var text string
-
-	// 支持两种格式：application/json 和 application/x-www-form-urlencoded
-	contentType := r.Header.Get("Content-Type")
-
-	switch {
-	case strings.Contains(contentType, "application/json"):
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "读取请求体失败", http.StatusBadRequest)
-			return
-		}
-		var req TTSRequest
-		if err := json.Unmarshal(body, &req); err != nil {
-			http.Error(w, "无效的 JSON 格式", http.StatusBadRequest)
-			return
-		}
-		text = req.Text
-
-	case strings.Contains(contentType, "application/x-www-form-urlencoded"):
-		if err := r.ParseForm(); err != nil {
-			http.Error(w, "解析表单失败", http.StatusBadRequest)
-			return
-		}
-		text = r.FormValue("text")
-
-	default:
-		http.Error(w, "不支持的内容类型，请使用 JSON 或表单", http.StatusUnsupportedMediaType)
-		return
-	}
-
-	// 校验文本
-	text = strings.TrimSpace(text)
-	if text == "" {
-		http.Error(w, "text 字段不能为空", http.StatusBadRequest)
-		return
-	}
-	if len(text) > 500 {
-		http.Error(w, "文本长度不能超过 500 字符", http.StatusBadRequest)
-		return
-	}
-
-	// 调用 TTS
-	log.Printf("正在朗读: %q", text)
-	err := speakText(text)
+func loadConfigFromFile(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		log.Printf("TTS 错误: %v", err)
-		http.Error(w, "TTS 执行失败，请检查系统语音设置", http.StatusInternalServerError)
-		return
+		return nil, fmt.Errorf("无法读取配置文件 %q: %w", path, err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("配置文件 %q 不是有效的 JSON: %w", path, err)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"status": "success",
-		"msg":    "已开始朗读",
-	})
+	// 手动提取字段（避免结构体零值覆盖）
+	cfg := &Config{}
+	if v, ok := raw["broker"]; ok {
+		if s, ok := v.(string); ok {
+			cfg.Broker = s
+		}
+	}
+	if v, ok := raw["topic"]; ok {
+		if s, ok := v.(string); ok {
+			cfg.Topic = s
+		}
+	}
+	if v, ok := raw["username"]; ok {
+		if s, ok := v.(string); ok {
+			cfg.Username = s
+		}
+	}
+	if v, ok := raw["password"]; ok {
+		if s, ok := v.(string); ok {
+			cfg.Password = s
+		}
+	}
+	return cfg, nil
 }
 
 func main() {
-	http.HandleFunc("/tts", ttsHandler)
+	var (
+		configFile string
+		broker     string
+		topic      string
+		username   string
+		password   string
+		showHelp   bool
+	)
 
-	fmt.Println("🚀 Windows 离线 TTS 服务已启动")
-	fmt.Println("📌 监听地址: http://localhost:5555/tts")
-	fmt.Println("📝 支持 POST，内容类型：application/json 或 application/x-www-form-urlencoded")
-	fmt.Println("💡 示例（JSON）:")
-	fmt.Println(`   curl -X POST http://localhost:5555/tts -H "Content-Type: application/json" -d '{"text":"你好，世界！"}'`)
-	fmt.Println("💡 示例（表单）:")
-	fmt.Println(`   curl -X POST http://localhost:5555/tts -d "text=欢迎使用 Go TTS"`)
+	pflag.StringVarP(&configFile, "config", "c", "", "可选：JSON 配置文件路径（不指定则不加载）")
+	pflag.StringVarP(&broker, "broker", "b", "", "MQTT Broker 地址 (e.g. tcp://localhost:1883)")
+	pflag.StringVarP(&topic, "topic", "t", "", "订阅的主题")
+	pflag.StringVarP(&username, "username", "u", "", "MQTT 用户名")
+	pflag.StringVarP(&password, "password", "p", "", "MQTT 密码")
+	pflag.BoolVarP(&showHelp, "help", "h", false, "显示帮助")
+	pflag.Parse()
 
-	log.Fatal(http.ListenAndServe(":5555", nil))
+	if showHelp {
+		pflag.Usage()
+		os.Exit(0)
+	}
+
+	// 1. 从默认值开始
+	cfg := &Config{
+		Broker: "tcp://localhost:1883",
+		Topic:  "home/tts/say",
+	}
+
+	// 2. 如果指定了 -c，则加载配置文件
+	if configFile != "" {
+		fileCfg, err := loadConfigFromFile(configFile)
+		if err != nil {
+			log.Fatalf("❌ %v", err)
+		}
+		// 合并：配置文件覆盖默认值
+		if fileCfg.Broker != "" {
+			cfg.Broker = fileCfg.Broker
+		}
+		if fileCfg.Topic != "" {
+			cfg.Topic = fileCfg.Topic
+		}
+		if fileCfg.Username != "" {
+			cfg.Username = fileCfg.Username
+		}
+		if fileCfg.Password != "" {
+			cfg.Password = fileCfg.Password
+		}
+	}
+
+	// 3. 命令行参数优先级最高
+	if broker != "" {
+		cfg.Broker = broker
+	}
+	if topic != "" {
+		cfg.Topic = topic
+	}
+	if username != "" {
+		cfg.Username = username
+	}
+	if password != "" {
+		cfg.Password = password
+	}
+
+	// 启动 MQTT 客户端
+	opts := mqtt.NewClientOptions()
+	opts.AddBroker(cfg.Broker)
+	opts.SetClientID("go-tts-client-" + fmt.Sprintf("%d", time.Now().Unix()))
+	opts.SetAutoReconnect(true)
+	opts.SetConnectRetry(true)
+	opts.SetConnectRetryInterval(5 * time.Second)
+
+	if cfg.Username != "" {
+		opts.SetUsername(cfg.Username)
+	}
+	if cfg.Password != "" {
+		opts.SetPassword(cfg.Password)
+	}
+
+	client := mqtt.NewClient(opts)
+	if token := client.Connect(); token.Wait() && token.Error() != nil {
+		log.Fatalf("无法连接 MQTT Broker %s: %v", cfg.Broker, token.Error())
+	}
+
+	if token := client.Subscribe(cfg.Topic, 1, f); token.Wait() && token.Error() != nil {
+		log.Fatalf("无法订阅主题 %s: %v", cfg.Topic, token.Error())
+	}
+
+	log.Printf("✅ 已连接 MQTT Broker: %s", cfg.Broker)
+	if cfg.Username != "" {
+		log.Printf("👤 使用用户名: %s", cfg.Username)
+	}
+	log.Printf("🎧 正在监听主题: %s", cfg.Topic)
+	log.Println("💡 示例:")
+	log.Println(`   tts-mqtt.exe -b tcp://192.168.1.100:1883 -t my/tts -u user -p pass`)
+	log.Println(`   tts-mqtt.exe -c config.json`)
+
+	select {}
 }
