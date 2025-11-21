@@ -27,6 +27,11 @@ jobs:
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $env:GITHUB_ENV
         shell: pwsh
 
+      - name: Tidy and verify
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum 
+
       - name: Build Windows executable
         run: |
           go build -ldflags="-s -w -X main.version=${{ env.VERSION }}" -o bin/tts.exe .
