@@ -113,12 +113,12 @@ func main() {
 	http.HandleFunc("/tts", ttsHandler)
 
 	fmt.Println("🚀 Windows 离线 TTS 服务已启动")
-	fmt.Println("📌 监听地址: http://localhost:55/tts")
+	fmt.Println("📌 监听地址: http://localhost:5555/tts")
 	fmt.Println("📝 支持 POST，内容类型：application/json 或 application/x-www-form-urlencoded")
 	fmt.Println("💡 示例（JSON）:")
-	fmt.Println(`   curl -X POST http://localhost:55/tts -H "Content-Type: application/json" -d '{"text":"你好，世界！"}'`)
+	fmt.Println(`   curl -X POST http://localhost:5555/tts -H "Content-Type: application/json" -d '{"text":"你好，世界！"}'`)
 	fmt.Println("💡 示例（表单）:")
-	fmt.Println(`   curl -X POST http://localhost:55/tts -d "text=欢迎使用 Go TTS"`)
+	fmt.Println(`   curl -X POST http://localhost:5555/tts -d "text=欢迎使用 Go TTS"`)
 
-	log.Fatal(http.ListenAndServe(":55", nil))
+	log.Fatal(http.ListenAndServe(":5555", nil))
 }
