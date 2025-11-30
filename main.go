@@ -50,33 +50,40 @@ var f mqtt.MessageHandler = func(client mqtt.Client, msg mqtt.Message) {
 func speakText(text string) error {
 	 log.Printf("🔊 尝试朗读文本 (长度=%d): %.50q", len(text), text) // 最多显示前50字符
 
-    err := ole.CoInitialize(0)
-    if err != nil {
-        log.Printf("❌ COM 初始化失败: %v", err)
-        return fmt.Errorf("COM 初始化失败: %v", err)
-    }
-    defer ole.CoUninitialize()
+    // 转义 PowerShell 特殊字符
+	safeText := strings.ReplaceAll(text, "\"", "`\"")
+	safeText = strings.ReplaceAll(safeText, "$", "`$")
 
-    unknown, err := oleutil.CreateObject("SAPI.SpVoice")
-    if err != nil {
-        log.Printf("❌ 创建 SpVoice 对象失败: %v", err)
-        return fmt.Errorf("创建 SpVoice 失败: %v", err)
-    }
-    voice, err := unknown.QueryInterface(ole.IID_IDispatch)
-    if err != nil {
-        log.Printf("❌ QueryInterface 失败: %v", err)
-        unknown.Release()
-        return fmt.Errorf("QueryInterface 失败: %v", err)
-    }
-    defer voice.Release()
+	// 构建 PowerShell 命令（增加错误捕获和静默模式）
+	psCmd := `
+			try {
+			    Add-Type -AssemblyName System.Speech
+			    $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+			    $synth.Speak("` + safeText + `")
+			    Write-Host "✅ TTS 成功: 长度=$(("` + safeText + `").Length)"
+			} catch {
+			    Write-Error "❌ TTS 失败: $($_.Exception.Message)"
+			    exit 1
+			}
+			`
 
-    result, err := oleutil.CallMethod(voice, "Speak", text)
-    if err != nil {
-        log.Printf("❌ Speak 调用失败: %v", err)
-    } else {
-        log.Printf("ℹ️ Speak 返回值: %v", result.Val)
-    }
-    return err
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", psCmd)
+
+	// 捕获 stdout + stderr 合并输出
+	output, err := cmd.CombinedOutput()
+
+	// 记录完整输出（包含 Write-Host 和 Write-Error）
+	logMsg := strings.TrimSpace(string(output))
+	if logMsg != "" {
+		log.Printf("🔊 PowerShell TTS 输出: %s", logMsg)
+	}
+
+	if err != nil {
+		log.Printf("❌ PowerShell TTS 执行失败: %v", err)
+		return err
+	}
+
+	return nil
 }
 
 func loadConfigFromFile(path string) (*Config, error) {
