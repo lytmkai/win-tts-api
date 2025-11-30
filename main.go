@@ -6,12 +6,11 @@ import (
 	"log"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
-	"github.com/go-ole/go-ole"
-	"github.com/go-ole/go-ole/oleutil"
 	"github.com/spf13/pflag"
 )
 
