@@ -234,7 +234,7 @@ func main() {
 	    log.Fatalf("❌ 无法连接到 MQTT Broker: %v", err)
 	}
 		
-	token := client.Subscribe(cfg.Topic, 1, f)
+	token = client.Subscribe(cfg.Topic, 1, f)
 	if !token.WaitTimeout(10 * time.Second) {
 		log.Fatalf("订阅主题超时 %s: %v", cfg.Topic, token.Error())
 	}
