@@ -47,24 +47,35 @@ var f mqtt.MessageHandler = func(client mqtt.Client, msg mqtt.Message) {
 }
 
 func speakText(text string) error {
-	err := ole.CoInitialize(0)
-	if err != nil {
-		return fmt.Errorf("COM 初始化失败: %v", err)
-	}
-	defer ole.CoUninitialize()
+	 log.Printf("🔊 尝试朗读文本 (长度=%d): %.50q", len(text), text) // 最多显示前50字符
 
-	unknown, err := oleutil.CreateObject("SAPI.SpVoice")
-	if err != nil {
-		return fmt.Errorf("创建 SpVoice 失败: %v", err)
-	}
-	voice, err := unknown.QueryInterface(ole.IID_IDispatch)
-	if err != nil {
-		return fmt.Errorf("QueryInterface 失败: %v", err)
-	}
-	defer voice.Release()
+    err := ole.CoInitialize(0)
+    if err != nil {
+        log.Printf("❌ COM 初始化失败: %v", err)
+        return fmt.Errorf("COM 初始化失败: %v", err)
+    }
+    defer ole.CoUninitialize()
 
-	_, err = oleutil.CallMethod(voice, "Speak", text)
-	return err
+    unknown, err := oleutil.CreateObject("SAPI.SpVoice")
+    if err != nil {
+        log.Printf("❌ 创建 SpVoice 对象失败: %v", err)
+        return fmt.Errorf("创建 SpVoice 失败: %v", err)
+    }
+    voice, err := unknown.QueryInterface(ole.IID_IDispatch)
+    if err != nil {
+        log.Printf("❌ QueryInterface 失败: %v", err)
+        unknown.Release()
+        return fmt.Errorf("QueryInterface 失败: %v", err)
+    }
+    defer voice.Release()
+
+    result, err := oleutil.CallMethod(voice, "Speak", text)
+    if err != nil {
+        log.Printf("❌ Speak 调用失败: %v", err)
+    } else {
+        log.Printf("ℹ️ Speak 返回值: %v", result.Val)
+    }
+    return err
 }
 
 func loadConfigFromFile(path string) (*Config, error) {
@@ -104,68 +115,98 @@ func loadConfigFromFile(path string) (*Config, error) {
 
 func main() {
 	var (
-		configFile string
-		broker     string
-		topic      string
-		username   string
-		password   string
-		showHelp   bool
-	)
+        broker   string
+        topic    string
+        username string
+        password string
+        showHelp bool
+    )
 
-	pflag.StringVarP(&configFile, "config", "c", "", "可选：JSON 配置文件路径（不指定则不加载）")
+
+	logFile, err := os.OpenFile("tts-mqtt.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "无法创建日志文件: %v\n", err)
+        os.Exit(1)
+    }
+    defer logFile.Close()
+
+    // 可选：同时输出到控制台和文件
+    multiWriter := io.MultiWriter(os.Stdout, logFile)
+    log.SetOutput(multiWriter)
+
+    // 设置日志前缀（含时间戳）
+    log.SetFlags(log.LstdFlags | log.Lshortfile) // Lshortfile 显示文件:行号，便于调试
+    // =============================
+
+	
+
 	pflag.StringVarP(&broker, "broker", "b", "", "MQTT Broker 地址 (e.g. tcp://localhost:1883)")
-	pflag.StringVarP(&topic, "topic", "t", "", "订阅的主题")
-	pflag.StringVarP(&username, "username", "u", "", "MQTT 用户名")
-	pflag.StringVarP(&password, "password", "p", "", "MQTT 密码")
-	pflag.BoolVarP(&showHelp, "help", "h", false, "显示帮助")
-	pflag.Parse()
+    pflag.StringVarP(&topic, "topic", "t", "", "订阅的主题")
+    pflag.StringVarP(&username, "username", "u", "", "MQTT 用户名")
+    pflag.StringVarP(&password, "password", "p", "", "MQTT 密码")
+    pflag.BoolVarP(&showHelp, "help", "h", false, "显示帮助")
+    pflag.Parse()
 
 	if showHelp {
 		pflag.Usage()
 		os.Exit(0)
 	}
 
-	// 1. 从默认值开始
-	cfg := &Config{
-		Broker: "tcp://localhost:1883",
-		Topic:  "home/tts/say",
-	}
+	if showHelp {
+        pflag.Usage()
+        os.Exit(0)
+    }
 
-	// 2. 如果指定了 -c，则加载配置文件
-	if configFile != "" {
-		fileCfg, err := loadConfigFromFile(configFile)
-		if err != nil {
-			log.Fatalf("❌ %v", err)
-		}
-		// 合并：配置文件覆盖默认值
-		if fileCfg.Broker != "" {
-			cfg.Broker = fileCfg.Broker
-		}
-		if fileCfg.Topic != "" {
-			cfg.Topic = fileCfg.Topic
-		}
-		if fileCfg.Username != "" {
-			cfg.Username = fileCfg.Username
-		}
-		if fileCfg.Password != "" {
-			cfg.Password = fileCfg.Password
-		}
-	}
+    // 默认配置
+    cfg := &Config{
+        Broker: "tcp://localhost:1883",
+        Topic:  "home/tts/say",
+    }
 
-	// 3. 命令行参数优先级最高
-	if broker != "" {
-		cfg.Broker = broker
-	}
-	if topic != "" {
-		cfg.Topic = topic
-	}
-	if username != "" {
-		cfg.Username = username
-	}
-	if password != "" {
-		cfg.Password = password
-	}
+    const defaultConfigFile = "config.json"
+    var loadedFromConfig = false
 
+    // ✅ 自动检测 config.json 是否存在
+    if _, err := os.Stat(defaultConfigFile); err == nil {
+        // 文件存在，尝试加载
+        fileCfg, err := loadConfigFromFile(defaultConfigFile)
+        if err != nil {
+            log.Fatalf("❌ 配置文件 %q 存在但加载失败: %v", defaultConfigFile, err)
+        }
+        // 合并：配置文件字段优先，非空才覆盖
+        if fileCfg.Broker != "" {
+            cfg.Broker = fileCfg.Broker
+        }
+        if fileCfg.Topic != "" {
+            cfg.Topic = fileCfg.Topic
+        }
+        if fileCfg.Username != "" {
+            cfg.Username = fileCfg.Username
+        }
+        if fileCfg.Password != "" {
+            cfg.Password = fileCfg.Password
+        }
+        loadedFromConfig = true
+        log.Printf("✅ 使用配置文件: %s", defaultConfigFile)
+    }
+
+    // ✅ 仅当未从配置文件加载时，才应用命令行参数
+    if !loadedFromConfig {
+        if broker != "" {
+            cfg.Broker = broker
+        }
+        if topic != "" {
+            cfg.Topic = topic
+        }
+        if username != "" {
+            cfg.Username = username
+        }
+        if password != "" {
+            cfg.Password = password
+        }
+        log.Println("ℹ️ 未找到 config.json，使用命令行参数或默认值")
+    }
+	
 	// 启动 MQTT 客户端
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(cfg.Broker)
