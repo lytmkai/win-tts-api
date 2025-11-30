@@ -224,12 +224,22 @@ func main() {
 	}
 
 	client := mqtt.NewClient(opts)
-	if token := client.Connect(); token.Wait() && token.Error() != nil {
-		log.Fatalf("无法连接 MQTT Broker %s: %v", cfg.Broker, token.Error())
+	
+	token := client.Connect()
+	// 设置 10 秒超时
+	if !token.WaitTimeout(10 * time.Second) {
+	    log.Fatal("❌ 连接 MQTT Broker 超时（10秒）")
 	}
-
-	if token := client.Subscribe(cfg.Topic, 1, f); token.Wait() && token.Error() != nil {
-		log.Fatalf("无法订阅主题 %s: %v", cfg.Topic, token.Error())
+	if err := token.Error(); err != nil {
+	    log.Fatalf("❌ 无法连接到 MQTT Broker: %v", err)
+	}
+		
+	token := client.Subscribe(cfg.Topic, 1, f)
+	if !token.WaitTimeout(10 * time.Second) {
+		log.Fatalf("订阅主题超时 %s: %v", cfg.Topic, token.Error())
+	}
+	if err := token.Error(); err != nil {
+	    log.Fatalf("❌ 无法订阅主题: %v", err)
 	}
 
 	log.Printf("✅ 已连接 MQTT Broker: %s", cfg.Broker)
