@@ -39,11 +39,31 @@ var f mqtt.MessageHandler = func(client mqtt.Client, msg mqtt.Message) {
 		return
 	}
 
-	if err := speakText(text); err != nil {
-		log.Printf("❌ TTS 错误: %v", err)
-	} else {
-		log.Printf("✅ 已完成朗读: %q", text)
-	}
+
+	// ✅ 异步处理 TTS，避免阻塞 MQTT 回调
+    go func(t string) {
+        ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+        defer cancel()
+        
+        done := make(chan error, 1)
+        go func() {
+            done <- speakText(t)
+        }()
+
+        select {
+        case err := <-done:
+            if err != nil {
+                log.Printf("❌ TTS 错误: %v", err)
+            } else {
+                log.Printf("✅ 已完成朗读: %q", t)
+            }
+        case <-ctx.Done():
+            log.Printf("⏰ TTS 超时（30秒），放弃朗读: %.50q", t)
+            // 注意：无法强制 kill powershell 进程，但至少不卡主线
+        }
+    }(text)
+
+	
 }
 
 func speakText(text string) error {
@@ -52,6 +72,8 @@ func speakText(text string) error {
     // 转义 PowerShell 特殊字符
 	safeText := strings.ReplaceAll(text, "\"", "`\"")
 	safeText = strings.ReplaceAll(safeText, "$", "`$")
+
+	start := time.Now()
 
 	// 构建 PowerShell 命令（增加错误捕获和静默模式）
 	psCmd := `
@@ -81,6 +103,8 @@ func speakText(text string) error {
 		log.Printf("❌ PowerShell TTS 执行失败: %v", err)
 		return err
 	}
+
+	log.Printf("🔊 朗读结束，耗时: %v", time.Since(start))
 
 	return nil
 }
@@ -137,9 +161,7 @@ func main() {
     }
     defer logFile.Close()
 
-    // 可选：同时输出到控制台和文件
-    multiWriter := io.MultiWriter(os.Stdout, logFile)
-    log.SetOutput(multiWriter)
+    log.SetOutput(logFile)
 
     // 设置日志前缀（含时间戳）
     log.SetFlags(log.LstdFlags | log.Lshortfile) // Lshortfile 显示文件:行号，便于调试
@@ -217,10 +239,24 @@ func main() {
 	// 启动 MQTT 客户端
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(cfg.Broker)
-	opts.SetClientID("go-tts-client-" + fmt.Sprintf("%d", time.Now().Unix()))
+	opts.SetClientID("go-tts-client")
 	opts.SetAutoReconnect(true)
 	opts.SetConnectRetry(true)
 	opts.SetConnectRetryInterval(5 * time.Second)
+
+	opts.SetOnConnectHandler(func(client mqtt.Client) {
+	    log.Println("🔌 MQTT 连接成功，正在重新订阅主题...")
+	    token := client.Subscribe(cfg.Topic, 1, f)
+	    if !token.WaitTimeout(5 * time.Second) || token.Error() != nil {
+	        log.Fatalf("❌ 重订阅失败: %v", token.Error())
+	    }
+	    log.Printf("✅ 重订阅成功: %s", cfg.Topic)
+	})
+	
+	// 可选：添加连接丢失回调用于调试
+	opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
+	    log.Printf("⚠️ MQTT 连接已断开: %v", err)
+	})
 
 	if cfg.Username != "" {
 		opts.SetUsername(cfg.Username)
